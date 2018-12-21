@@ -22,3 +22,8 @@ SOFTWARE.
 
 // zrpc package implements ZeroRPC (https://zerorpc.io) protocol.
 package zrpc
+
+// ProtocolVersion constant specifies version of ZeroRPC protocol implemented by this library,
+// all other versions are unsupported and responses/requests with them will be rejected
+// (i.e. go-zrpc is incompatible with ZeroRPC 1 and ZeroRPC 2).
+const ProtocolVersion = 3

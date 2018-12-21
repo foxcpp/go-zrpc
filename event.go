@@ -23,7 +23,6 @@ SOFTWARE.
 package zrpc
 
 import (
-	"fmt"
 	"io"
 
 	"github.com/pkg/errors"
@@ -45,40 +44,42 @@ type event struct {
 	Args interface{}
 }
 
-// UnmarshalBinary decodes event from "on-wire" binary representation.
-func (e *event) UnmarshalBinary(src io.Reader) error {
-	dec := msgpack.NewDecoder(src)
+func (e *event) DecodeMsgpack(dec *msgpack.Decoder) error {
 	dec.UseDecodeInterfaceLoose(true)
 	length, err := dec.DecodeArrayLen()
 	if err != nil {
 		return err
 	}
 	if length != 3 {
-		return errors.Errorf("event read: got %d fields, wanted 3", length)
+		return errors.Errorf("event parse: got %d fields, wanted 3", length)
 	}
 
 	if err := dec.Decode(&e.Hdr); err != nil {
-		return errors.Wrap(err, "event read (header)")
+		return errors.Wrap(err, "event parse (header)")
 	}
 	e.Name, err = dec.DecodeString()
 	if err != nil {
-		return errors.Wrap(err, "event read (name)")
+		return errors.Wrap(err, "event parse (name)")
 	}
 	e.Args, err = dec.DecodeInterfaceLoose()
 	if err != nil {
-		return errors.Wrap(err, "event read (args)")
+		return errors.Wrap(err, "event parse (args)")
 	}
 	return nil
+}
+
+func (e *event) EncodeMsgpack(enc *msgpack.Encoder) error {
+	return enc.Encode([3]interface{}{e.Hdr, e.Name, e.Args})
+}
+
+// UnmarshalBinary decodes event from "on-wire" binary representation.
+func (e *event) UnmarshalBinary(src io.Reader) error {
+	dec := msgpack.NewDecoder(src)
+	return e.DecodeMsgpack(dec)
 }
 
 // MarshalBinary encodes event into "on-wire" binary representation.
 func (e *event) MarshalBinary() ([]byte, error) {
 	return msgpack.Marshal([3]interface{}{e.Hdr, e.Name, e.Args})
-}
-
-// String returns human-friendly representation of event object. Useful for debugging.
-func (e *event) String() string {
-	return fmt.Sprintf("Event(Hdr: (v=%d, id=%s, respTo=%s), Name: %s, Args: %v)",
-		e.Hdr.Version, e.Hdr.MsgID, e.Hdr.ResponseTo, e.Name, e.Args)
 }
 
