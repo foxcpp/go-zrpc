@@ -1,0 +1,18 @@
+sudo: false
+language: go
+
+go:
+  - "1.x"
+
+env:
+  - GO111MODULE=on
+
+install:
+  - curl -sfL https://install.goreleaser.com/github.com/golangci/golangci-lint.sh | sh -s -- -b $GOPATH/bin v1.12.3
+
+script:
+  - golangci-lint run -E megacheck,deadcode,typecheck,govet,misspell,prealloc,gofmt,gocyclo,goconst,dupl,unconvert,interfacer
+  - go test -race -coverprofile=coverage.txt -covermode=atomic ./...
+
+after_success:
+  - bash <(curl -s https://codecov.io/bash)
