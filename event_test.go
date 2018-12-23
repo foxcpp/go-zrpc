@@ -34,8 +34,8 @@ func TestEvent_MarshalUnmarshal(t *testing.T) {
 	t.Run("example event (args=5)", func(t *testing.T) {
 		ev := event{
 			Hdr: eventHdr{
-				Version: 3,
-				MsgID: "5a741c23675b4ae18c7441da24d1f9cf",
+				Version:    3,
+				MsgID:      "5a741c23675b4ae18c7441da24d1f9cf",
 				ResponseTo: "",
 			},
 			Name: "event_name_goes_here",
@@ -52,8 +52,8 @@ func TestEvent_MarshalUnmarshal(t *testing.T) {
 	t.Run("example event (args=[1,2,3], respTo=abc)", func(t *testing.T) {
 		ev := event{
 			Hdr: eventHdr{
-				Version: 3,
-				MsgID: "5a741c25675b4ae18c7441da24d1f9cf",
+				Version:    3,
+				MsgID:      "5a741c25675b4ae18c7441da24d1f9cf",
 				ResponseTo: "abc",
 			},
 			Name: "event_name_goes_here",
@@ -68,6 +68,14 @@ func TestEvent_MarshalUnmarshal(t *testing.T) {
 		assert.DeepEqual(t, ev, ev2)
 	})
 	// TODO: Can we use fuzzy-testing here? (generate set of random events and pass them through marshal-unmarshal).
+}
+
+func checkEventParseFail(t *testing.T, encoded string) {
+	ev := event{}
+	err := ev.UnmarshalBinary(strings.NewReader(encoded))
+	if err == nil {
+		t.Fatalf("Successfully 'parsed' an invalid event:\n%+v\n", ev)
+	}
 }
 
 func TestEvent_UnmarshalBinary(t *testing.T) {
@@ -95,5 +103,25 @@ func TestEvent_UnmarshalBinary(t *testing.T) {
 
 		assert.Equal(t, ev.Name, "event_name_goes_here")
 		assert.DeepEqual(t, ev.Args, []interface{}{int64(1), int64(2), int64(3)})
+	})
+	t.Run("malformed event (invalid msgpack)", func(t *testing.T) {
+		t.Run("invalid msgpack", func(t *testing.T) {
+			checkEventParseFail(t, "\x93abcdef")
+		})
+		t.Run("valid but irrelevant msgpack", func(t *testing.T) {
+			checkEventParseFail(t, "\x83\x01\x80\x02\xa6abcdef\x03\xc0")
+		})
+		t.Run("non-string name", func(t *testing.T) {
+			checkEventParseFail(t, "\x93\x82\xaamessage_id\xa3abc\xa1v\x03\xcc\xea\xc0")
+		})
+		t.Run("invalid version", func(t *testing.T) {
+			checkEventParseFail(t, "\x93\x82\xaamessage_id\xa3abc\xa1v\xa3abc\xa6abcdef\xc0")
+		})
+		t.Run("no version", func(t *testing.T) {
+			checkEventParseFail(t, "\x93\x81\xaamessage_id\xa3abc\xa6abcdef\xc0")
+		})
+		t.Run("no msgid", func(t *testing.T) {
+			checkEventParseFail(t, "\x93\x80\xa6abcdef\xc0")
+		})
 	})
 }

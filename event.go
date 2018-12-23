@@ -31,9 +31,9 @@ import (
 
 // eventHdr is a header part of event structure.
 type eventHdr struct {
-	Version int    `msgpack:"v",json:"v"`
-	MsgID   string `msgpack:"message_id",json:"message_id"`
-	ResponseTo string `msgpack:"response_to,omitempty",json:"response_to,omitempty"`
+	Version    int    `msgpack:"v" json:"v"`
+	MsgID      string `msgpack:"message_id" json:"message_id"`
+	ResponseTo string `msgpack:"response_to,omitempty" json:"response_to,omitempty"`
 }
 
 // The event structure represents base unit of communication defined
@@ -57,14 +57,26 @@ func (e *event) DecodeMsgpack(dec *msgpack.Decoder) error {
 	if err := dec.Decode(&e.Hdr); err != nil {
 		return errors.Wrap(err, "event parse (header)")
 	}
+	if e.Hdr.Version == 0 {
+		return errors.New("event parse (header): no version")
+	}
+	if e.Hdr.MsgID == "" {
+		return errors.New("event parse (header): no message id")
+	}
+
 	e.Name, err = dec.DecodeString()
 	if err != nil {
 		return errors.Wrap(err, "event parse (name)")
 	}
+	if e.Name == "" {
+		return errors.New("event parse: no name")
+	}
+
 	e.Args, err = dec.DecodeInterfaceLoose()
 	if err != nil {
 		return errors.Wrap(err, "event parse (args)")
 	}
+
 	return nil
 }
 
@@ -82,4 +94,3 @@ func (e *event) UnmarshalBinary(src io.Reader) error {
 func (e *event) MarshalBinary() ([]byte, error) {
 	return msgpack.Marshal([3]interface{}{e.Hdr, e.Name, e.Args})
 }
-
