@@ -44,8 +44,8 @@ func setupSockPair(t *testing.T) (client *socket, server *socket) {
 
 	uniqueAddr := fmt.Sprintf("inproc://test-%s-%p", t.Name(), &server)
 
-	assert.NilError(t, server.bind(uniqueAddr), "server.bind failed")
-	assert.NilError(t, client.connect(uniqueAddr), "client.connect failed")
+	assert.NilError(t, server.Bind(uniqueAddr), "server.Bind failed")
+	assert.NilError(t, client.Connect(uniqueAddr), "client.Connect failed")
 
 	return client, server
 }
@@ -57,7 +57,7 @@ func TestSocket_Close(t *testing.T) {
 
 		sock.openChannel("test-channel-1", "")
 
-		assert.NilError(t, sock.Close(), "Close failed")
+		assert.NilError(t, sock.Close(), "close failed")
 	})
 }
 
@@ -66,6 +66,13 @@ func TestChannelEventRoundtrip(t *testing.T) {
 		client, server := setupSockPair(t)
 		defer server.Close()
 		defer client.Close()
+
+		var servCh *channel
+		ok := make(chan bool)
+		server.newChannel = func(ch *channel) {
+			servCh = ch
+			ok <- true
+		}
 
 		ev := event{
 			Hdr: eventHdr{
@@ -78,18 +85,9 @@ func TestChannelEventRoundtrip(t *testing.T) {
 
 		assert.NilError(t, client.writeEvent(&ev, ""), "client.writeEvent failed")
 
-		time.Sleep(250 * time.Millisecond)
-
-		// On other side channel should be allocated and event should
-		// go into a queue on this channel.
-		server.chansLock.RLock()
-		servCh, prs := server.chans[ev.Hdr.MsgID]
-		server.chansLock.RUnlock()
-		assert.Equal(t, prs, true, "channel is not present in server's pool")
-		assert.Equal(t, len(servCh.queue), 1, "event is not in channel's queue")
-
-		servEv, err := servCh.recvEvent()
-		assert.NilError(t, err, "servCh.recvEvent")
+		<-ok
+		servEv, err := servCh.RecvEvent()
+		assert.NilError(t, err, "servCh.RecvEvent")
 		assert.DeepEqual(t, ev, *servEv)
 	})
 }
@@ -99,6 +97,13 @@ func TestChannelEventReply(t *testing.T) {
 		client, server := setupSockPair(t)
 		defer server.Close()
 		defer client.Close()
+
+		var servCh *channel
+		ok := make(chan bool)
+		server.newChannel = func(ch *channel) {
+			servCh = ch
+			ok <- true
+		}
 
 		ev := event{
 			Hdr: eventHdr{
@@ -123,22 +128,14 @@ func TestChannelEventReply(t *testing.T) {
 
 		time.Sleep(250 * time.Millisecond)
 
-		// On other side channel should be allocated and event should
-		// go into a queue on this channel.
-		server.chansLock.RLock()
-		servCh, prs := server.chans[ev.Hdr.MsgID]
-		server.chansLock.RUnlock()
-		assert.Equal(t, prs, true, "channel is not present in server's pool")
-		assert.Equal(t, len(servCh.queue), 1, "event is not in channel's queue")
-
-		servEv, err := servCh.recvEvent()
-		assert.NilError(t, err, "servCh.recvEvent failed")
+		<-ok
+		servEv, err := servCh.RecvEvent()
+		assert.NilError(t, err, "servCh.RecvEvent failed")
 		assert.DeepEqual(t, ev, *servEv)
 
-		assert.NilError(t, server.writeEvent(&replyEv, servCh.identity))
-		time.Sleep(250 * time.Millisecond)
-		clientReplyEv, err := clientCh.recvEvent()
-		assert.NilError(t, err, "clientCh.recvEvent failed")
+		assert.NilError(t, servCh.SendEvent(&replyEv))
+		clientReplyEv, err := clientCh.RecvEvent()
+		assert.NilError(t, err, "clientCh.RecvEvent failed")
 		assert.DeepEqual(t, replyEv, *clientReplyEv)
 	})
 }
@@ -177,7 +174,7 @@ func TestSocketUnsupportedVersion(t *testing.T) {
 }
 
 func TestChannelReportError(t *testing.T) {
-	RunWithTimeout(t, "no running recvEvent", 10*time.Second, func(t *testing.T) {
+	RunWithTimeout(t, "no running RecvEvent", 10*time.Second, func(t *testing.T) {
 		// should not block
 		sock, err := newSocket(zmq4.DEALER)
 		assert.NilError(t, err, "newSocket failed")
@@ -188,18 +185,18 @@ func TestChannelReportError(t *testing.T) {
 		ch := sock.openChannel("test-channel-1", "")
 		ch.reportError(testErr)
 	})
-	RunWithTimeout(t, "1 running recvEvent", 10*time.Second, func(t *testing.T) {
-		// error should be reported to running recvEvent
+	RunWithTimeout(t, "1 running RecvEvent", 10*time.Second, func(t *testing.T) {
+		// error should be reported to running RecvEvent
 		sock, err := newSocket(zmq4.DEALER)
 		assert.NilError(t, err, "newSocket failed")
-		//defer sock.Close()
+		defer sock.Close()
 
 		testErr := errors.New("testError")
 
 		ch := sock.openChannel("test-channel-1", "")
 
 		go func() {
-			_, err = ch.recvEvent()
+			_, err = ch.RecvEvent()
 			assert.Error(t, err, testErr.Error(), "different (or no) error returned")
 		}()
 
@@ -226,7 +223,7 @@ func TestChannelHeartbeat(t *testing.T) {
 		// In reality, this would be triggered by event sent from client.
 		server.openChannel("test-channel-1", "")
 
-		_, err := clientCh.recvEvent()
+		_, err := clientCh.RecvEvent()
 		assert.Error(t, err, ErrRemoteLost.Error(), "no error is reported")
 	})
 	RunWithTimeout(t, "normal flow", 15*time.Second, func(t *testing.T) {
@@ -237,9 +234,8 @@ func TestChannelHeartbeat(t *testing.T) {
 		server.defaultHeartbeatInterval = 2 * time.Second
 		client.defaultHeartbeatInterval = 2 * time.Second
 
-		clientCh := client.openChannel("test-channel-1", "")
-		err := clientCh.sendEvent(&event{Name: "testA"})
-		assert.NilError(t, err, "sendEvent failed")
+		clientCh, err := client.OpenSendEvent(&event{Name: "testA"})
+		assert.NilError(t, err, "SendEvent failed")
 
 		time.Sleep(5 * time.Second)
 
@@ -247,8 +243,7 @@ func TestChannelHeartbeat(t *testing.T) {
 		servCh, prs := server.chans[clientCh.id]
 		server.chansLock.Unlock()
 		assert.Equal(t, prs, true, "no channel is created at server side")
-		_, err = servCh.recvEvent()
-		assert.NilError(t, err, "recvEvent failed")
-		fmt.Println("stopping")
+		_, err = servCh.RecvEvent()
+		assert.NilError(t, err, "RecvEvent failed")
 	})
 }
