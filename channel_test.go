@@ -35,7 +35,13 @@ import (
 // TODO: We need tests using multiple goroutines to
 // test library for thread-safety.
 
-func setupSockPair(t *testing.T) (client *socket, server *socket) {
+type testingT interface {
+	assert.TestingT
+	Helper()
+	Name() string
+}
+
+func setupSockPair(t testingT) (client *socket, server *socket) {
 	t.Helper()
 	client, err := newSocket(zmq4.DEALER)
 	assert.NilError(t, err, "newSocket")

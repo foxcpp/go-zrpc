@@ -29,6 +29,7 @@ import (
 	"math/rand"
 	"sync"
 	"sync/atomic"
+	"syscall"
 	"time"
 
 	"github.com/pebbe/zmq4"
@@ -125,12 +126,17 @@ func newSocket(t zmq4.Type) (s *socket, err error) {
 	s.defaultHeartbeatInterval = 5 * time.Second
 
 	go func() {
-		if err := s.dispatchReactor.Run(-1); err != nil {
-			if err.Error() == "" {
-				s.stopChan <- true
-				return
+		for {
+			if err := s.dispatchReactor.Run(-1); err != nil {
+				if err.Error() == "" {
+					s.stopChan <- true
+					return
+				}
+				if zmq4.AsErrno(err) == zmq4.Errno(syscall.EINTR) {
+					continue
+				}
 			}
-			// TODO: Can we have any kind of error handling here?
+			break
 		}
 		s.stopChan <- true
 	}()
@@ -139,60 +145,141 @@ func newSocket(t zmq4.Type) (s *socket, err error) {
 }
 
 func (s *socket) Connect(endpoint string) error {
-	return s.sock.Connect(endpoint)
+	for {
+		err := s.sock.Connect(endpoint)
+		if err != nil {
+			if IsIntr(err) {
+				continue
+			}
+		}
+		break
+	}
+	return nil
 }
 
 func (s *socket) Bind(endpoint string) error {
-	return s.sock.Bind(endpoint)
+	for {
+		err := s.sock.Bind(endpoint)
+		if err != nil {
+			if IsIntr(err) {
+				continue
+			}
+			return err
+		}
+		break
+	}
+	return nil
 }
 
-func (s *socket) Close() error {
+func (s *socket) Close() (err error) {
+	defer func() {
+		if err != nil {
+			panic(err)
+		}
+	}()
+
+	atomic.StoreUint32(&s.stopping, 1)
+
 	s.chansLock.Lock()
 	for id := range s.chans {
 		s.closeChannelNoLock(id)
 	}
 	s.chansLock.Unlock()
 
-	atomic.StoreUint32(&s.stopping, 1)
-	if _, err := s.pipeIn.SendMessage("WAKE_UP"); err != nil {
-		return err
+	for {
+		if _, err := s.pipeIn.SendMessage("WAKE_UP"); err != nil {
+			if IsIntr(err) {
+				continue
+			}
+			return err
+		}
+		break
 	}
 	<-s.stopChan
 
-	if err := s.pipeIn.Close(); err != nil {
-		return err
+	s.pipeInLck.Lock()
+	for {
+		if err := s.pipeIn.Close(); err != nil {
+			if IsIntr(err) {
+				continue
+			}
+			s.pipeInLck.Unlock()
+			return err
+		}
+		break
 	}
-	if err := s.pipeOut.Close(); err != nil {
-		return err
+	s.pipeInLck.Unlock()
+
+	for {
+		if err := s.pipeOut.Close(); err != nil {
+			if IsIntr(err) {
+				continue
+			}
+			return err
+		}
+		break
 	}
 
-	return s.sock.Close()
+	for {
+		if err := s.sock.Close(); err != nil {
+			if IsIntr(err) {
+				continue
+			}
+			return err
+		}
+		break
+	}
+
+	return nil
 }
 
 func (s *socket) sendEventFromPipe() {
-	msgParts, err := s.pipeOut.RecvMessageBytes(0)
-	if err != nil {
-		s.pipeErrs <- err
+	var msgParts [][]byte
+	var err error
+	for {
+		msgParts, err = s.pipeOut.RecvMessageBytes(0)
+		if err != nil {
+			if IsIntr(err) {
+				continue
+			}
+			s.pipeErrs <- err
+		}
+		break
 	}
 
-	// Weird, but we can't pass [][]byte to SendMessage.
-	iarr := make([]interface{}, len(msgParts))
 	for i, part := range msgParts {
-		iarr[i] = part
+		var flag zmq4.Flag
+		if i != len(msgParts)-1 {
+			flag = zmq4.SNDMORE
+		}
+		for {
+			if _, err := s.sock.SendBytes(part, flag); err != nil {
+				if IsIntr(err) {
+					continue
+				}
+				s.pipeErrs <- err
+				return
+			}
+			break
+		}
 	}
 
-	if _, err := s.sock.SendMessage(iarr...); err != nil {
-		s.pipeErrs <- err
-	}
 	s.pipeErrs <- nil
 }
 
 // readEvent reads and parses event sent on socket.
 // Returned identity is source peer's identity if socket have ROUTER type.
 func (s *socket) readEvent() (ev *event, identity string, err error) {
-	arr, err := s.sock.RecvMessageBytes(0)
-	if err != nil {
-		return nil, "", errors.Wrap(err, "event read (IO err)")
+	var arr [][]byte
+	for {
+		arr, err = s.sock.RecvMessageBytes(0)
+		if err != nil {
+			if IsIntr(err) {
+				continue
+			}
+			return nil, "", errors.Wrap(err, "event read (IO err)")
+		}
+		break
 	}
 
 	ev = new(event)
@@ -221,13 +308,24 @@ func (s *socket) writeEvent(ev *event, identity string) error {
 
 	s.pipeInLck.Lock()
 	defer s.pipeInLck.Unlock()
-	if identity == "" {
-		_, err = s.pipeIn.SendMessage(evBin)
-	} else {
-		_, err = s.pipeIn.SendMessage(identity, "", evBin)
+
+	if atomic.LoadUint32(&s.stopping) == 1 {
+		return zmq4.ErrorSocketClosed
 	}
-	if err != nil {
-		return errors.Wrap(err, "event write")
+
+	for {
+		if identity == "" {
+			_, err = s.pipeIn.SendMessage(evBin)
+		} else {
+			_, err = s.pipeIn.SendMessage(identity, "", evBin)
+		}
+		if err != nil {
+			if IsIntr(err) {
+				continue
+			}
+			return errors.Wrap(err, "event write")
+		}
+		break
 	}
 
 	return <-s.pipeErrs
@@ -311,6 +409,10 @@ func (s *socket) dispatchEvent() {
 
 	if !s.noVersionCheck && ev.Hdr.Version != ProtocolVersion {
 		s.reportError(errors.Wrap(ErrIncompatibleVersion{remoteVer: ev.Hdr.Version}, "dispatch event"))
+	}
+
+	if atomic.LoadUint32(&s.stopping) == 1 {
+		return
 	}
 
 	var ch *channel
@@ -407,6 +509,7 @@ func (c *channel) close() {
 	if c.heartbeatInterval != 0 && c.heartbeatStop != nil {
 		c.heartbeatStop <- struct{}{}
 		c.heartbeatTicker.Stop()
+		<-c.heartbeatStop
 	}
 
 	c.heartbeatLck.Unlock()
@@ -453,9 +556,13 @@ func (c *channel) heartbeat() {
 			}
 
 			if err := c.SendEvent(&event{Name: HeartbeatEvent}); err != nil {
+				if err == zmq4.ErrorSocketClosed {
+					return
+				}
 				c.reportError(errors.Wrap(err, "heartbeat"))
 			}
 		case <-c.heartbeatStop:
+			c.heartbeatStop <- struct{}{}
 			return
 		}
 	}

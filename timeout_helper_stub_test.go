@@ -1,3 +1,5 @@
+//+build notesttimeouts
+
 /*
 Copyright © Max Mazurov (fox.cpp) 2018
 
@@ -23,60 +25,20 @@ SOFTWARE.
 package zrpc
 
 import (
-	"syscall"
-
-	"github.com/pebbe/zmq4"
-	"github.com/pkg/errors"
+	"testing"
+	"time"
 )
 
-func socketPair() (a, b *zmq4.Socket, err error) {
-	for {
-		a, err = zmq4.NewSocket(zmq4.PAIR)
-		if err != nil {
-			if zmq4.AsErrno(err) == zmq4.Errno(syscall.EINTR) {
-				continue
-			}
-			return nil, nil, errors.Wrap(err, "socketPair")
-		}
-		break
-	}
-
-	for {
-		b, err = zmq4.NewSocket(zmq4.PAIR)
-		if err != nil {
-			if zmq4.AsErrno(err) == zmq4.Errno(syscall.EINTR) {
-				continue
-			}
-			return nil, nil, errors.Wrap(err, "socketPair")
-		}
-		break
-	}
-
-	uniqueAddr := "inproc://zrpc-" + randomString(32)
-
-	for {
-		if err := a.Bind(uniqueAddr); err != nil {
-			if zmq4.AsErrno(err) == zmq4.Errno(syscall.EINTR) {
-				continue
-			}
-			return nil, nil, errors.Wrap(err, "socketPair")
-		}
-		break
-	}
-
-	for {
-		if err := b.Connect(uniqueAddr); err != nil {
-			if zmq4.AsErrno(err) == zmq4.Errno(syscall.EINTR) {
-				continue
-			}
-			return nil, nil, errors.Wrap(err, "socketPair")
-		}
-		break
-	}
-
-	return a, b, nil
+func MustCompleteIn(t *testing.T, timeout time.Duration, f func()) bool {
+	t.Helper()
+	f()
+	return true
 }
 
-func IsIntr(err error) bool {
-	return zmq4.AsErrno(err) == zmq4.Errno(syscall.EINTR)
+func RunWithTimeout(tParent *testing.T, name string, timeout time.Duration, f func(t *testing.T)) {
+	tParent.Helper()
+	tParent.Run(name, func(t *testing.T) {
+		t.Helper()
+		f(t)
+	})
 }

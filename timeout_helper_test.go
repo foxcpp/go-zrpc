@@ -1,3 +1,5 @@
+//+build !notesttimeouts
+
 /*
 Copyright © Max Mazurov (fox.cpp) 2018
 
